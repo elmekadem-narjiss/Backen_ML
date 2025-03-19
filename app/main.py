@@ -1,9 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from pathlib import Path
 from app.utils.time_series import load_energy_consumption_data
-from app.services.prediction_service import predict_energy_consumption
+from app.services.prediction_service import apply_arima_model
+import pandas as pd
+import numpy as np
+from statsmodels.tsa.arima.model import ARIMA
 
 app = FastAPI()
+
 
 # Définir le chemin du fichier de données
 DATASET_DIR = Path("D:/PFE/DataSet")
@@ -14,10 +18,11 @@ data_cache = None  # Stocke les données après /load-data
 def root():
     return {"message": "Bienvenue dans le service de prédiction"}
 
+
 @app.get("/load-data")
 def load_data():
     """
-    Route pour charger et afficher les données.
+    Route pour charger et afficher les données avec la reconstruction de la colonne 'Timestamp' à partir des autres colonnes.
     """
     global data_cache  # Permet de modifier la variable globale
 
@@ -28,32 +33,60 @@ def load_data():
 
         # Charger les données
         df = load_energy_consumption_data(str(FILE_CSV))
-        data_cache = df  # Stocker les données chargées
 
-        return {"data": df.head().to_dict()}
+        # Déboguer : Afficher les premières lignes et les colonnes du DataFrame
+        print("Premières lignes du DataFrame après chargement :")
+        print(df.head())
+
+        print("Colonnes du DataFrame après chargement :")
+        print(df.columns)
+
+        # Vérifier si les colonnes 'Year', 'Month', 'Day', 'Hour' existent
+        if not all(col in df.columns for col in ['Year', 'Month', 'Day', 'Hour']):
+            raise HTTPException(status_code=400, detail="Erreur : Les colonnes 'Year', 'Month', 'Day', 'Hour' sont manquantes.")
+
+        # Reconstituer la colonne 'Timestamp' à partir des colonnes 'Year', 'Month', 'Day', 'Hour'
+        df['Timestamp'] = pd.to_datetime(df[['Year', 'Month', 'Day', 'Hour']])
+
+        # Vérifier si la colonne 'Timestamp' a bien été reconstituée
+        if 'Timestamp' not in df.columns:
+            raise HTTPException(status_code=400, detail="Erreur : La colonne 'Timestamp' est absente après la reconstitution.")
+
+        # Stocker les données chargées
+        data_cache = df  # Enregistrer les données dans la variable globale
+
+        # Déboguer : Afficher les types de données des colonnes pour voir si la colonne 'Timestamp' est correcte
+        print("Types de données des colonnes après reconstitution de 'Timestamp' :")
+        print(df.dtypes)
+
+        # Convertir le DataFrame en dictionnaire (incluant la colonne 'Timestamp' et autres colonnes utiles)
+        data_dict = df[['Timestamp', 'Temperature', 'Humidity', 'SquareFootage', 'Occupancy', 'RenewableEnergy', 'EnergyConsumption']].head().to_dict(orient="records")
+
+        # Retourner les données au format JSON
+        return {"data": data_dict}
+
     except Exception as e:
+        # Déboguer : Afficher l'exception complète pour aider à identifier le problème
+        print(f"Exception capturée : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors du chargement des données : {e}")
 
-@app.get("/predict")
-def get_prediction(days: int = 10):
-    """ Fait des prédictions sur la consommation d'énergie pour les prochains jours. """
-    global data_cache  # Déclare `data_cache` comme global pour l'utiliser
+
+@app.get("/forecast")
+def forecast_data():
+    """
+    Route pour effectuer des prévisions sur les données de consommation d'énergie.
+    """
+    global data_cache  # On suppose que les données sont déjà chargées dans `data_cache`
+
+    if data_cache is None:
+        raise HTTPException(status_code=400, detail="Les données doivent d'abord être chargées via /load-data.")
 
     try:
-        if data_cache is None:
-            raise HTTPException(status_code=400, detail="Veuillez d'abord charger les données via /load-data.")
+        # Appliquer ARIMA sur les données chargées
+        forecast_df = apply_arima_model(data_cache, steps=30)
 
-        if days < 1 or days > 365:
-            raise HTTPException(status_code=400, detail="Le nombre de jours doit être compris entre 1 et 365.")
+        # Retourner les 10 dernières lignes (y compris les prévisions)
+        return {"forecast": forecast_df.tail(10).to_dict(orient="records")}  # Utilisation de 'orient="records"' pour une réponse lisible
 
-        prediction = predict_energy_consumption(data_cache, days)
-
-        if prediction is None:
-            raise HTTPException(status_code=500, detail="La prédiction a échoué, veuillez vérifier les données.")
-
-        return {"predictions": prediction.tolist()}
-
-    except HTTPException as e:
-        raise e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la prédiction : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la génération des prévisions : {e}")

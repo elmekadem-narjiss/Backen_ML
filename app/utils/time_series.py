@@ -3,6 +3,8 @@ from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
+from statsmodels.tsa.arima.model import ARIMA
+import matplotlib.pyplot as plt
 
 app = FastAPI()
 
@@ -20,11 +22,21 @@ def load_energy_consumption_data(file_path: str):
         
         # Vérification et conversion du timestamp
         if 'Timestamp' in df.columns:
-            df["timestamp"] = pd.to_datetime(df["Timestamp"], format='%Y-%m-%d %H:%M:%S', errors='coerce')
-            df.drop(columns=["Timestamp"], inplace=True)
+            # Conversion de la colonne 'Timestamp' en format datetime, en gardant les erreurs en 'NaT'
+            df["Timestamp"] = pd.to_datetime(df["Timestamp"], format='%Y-%m-%d %H:%M:%S', errors='coerce')
+            
+            # Vérifiez que la colonne 'Timestamp' a été correctement convertie
+            if df["Timestamp"].isnull().all():
+                raise HTTPException(status_code=400, detail="Erreur : La colonne 'Timestamp' contient des valeurs invalides.")
         else:
             raise HTTPException(status_code=400, detail="Erreur : La colonne 'Timestamp' est absente du fichier.")
-
+        
+        # Extraction de l'année, du mois, du jour et de l'heure si nécessaire
+        df['Year'] = df['Timestamp'].dt.year
+        df['Month'] = df['Timestamp'].dt.month
+        df['Day'] = df['Timestamp'].dt.day
+        df['Hour'] = df['Timestamp'].dt.hour
+        
         # Suppression des lignes contenant des NaN
         df.dropna(axis=0, how='any', inplace=True)
 
@@ -39,5 +51,4 @@ def load_energy_consumption_data(file_path: str):
 
 
 # Chemin vers le fichier CSV
-energy_consumption_path = "D:/PFE/DataSet/Energy_consumption.csv"
-
+file_path = "D:/PFE/DataSet/Energy_consumption.csv"
