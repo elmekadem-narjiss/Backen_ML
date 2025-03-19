@@ -1,10 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from pathlib import Path
-from app.utils.time_series import load_energy_consumption_data
+from app.utils.time_series import load_energy_consumption_data ,save_data_to_influxdb
 from app.services.prediction_service import apply_arima_model
 import pandas as pd
 import numpy as np
 from statsmodels.tsa.arima.model import ARIMA
+import os
 
 app = FastAPI()
 
@@ -21,53 +22,41 @@ def root():
 
 @app.get("/load-data")
 def load_data():
-    """
-    Route pour charger et afficher les données avec la reconstruction de la colonne 'Timestamp' à partir des autres colonnes.
-    """
     global data_cache  # Permet de modifier la variable globale
 
     try:
-        # Vérifier si le fichier existe
-        if not FILE_CSV.exists():
+        print("📂 Vérification de l'existence du fichier CSV...")
+        if not os.path.exists(str(FILE_CSV)):  # Vérifier si le fichier existe
             raise HTTPException(status_code=404, detail="Fichier introuvable. Vérifiez le chemin.")
 
         # Charger les données
         df = load_energy_consumption_data(str(FILE_CSV))
 
-        # Déboguer : Afficher les premières lignes et les colonnes du DataFrame
-        print("Premières lignes du DataFrame après chargement :")
+        print("🔍 Vérification des premières lignes du DataFrame...")
         print(df.head())
 
-        print("Colonnes du DataFrame après chargement :")
-        print(df.columns)
-
-        # Vérifier si les colonnes 'Year', 'Month', 'Day', 'Hour' existent
+        # Vérification des colonnes nécessaires
         if not all(col in df.columns for col in ['Year', 'Month', 'Day', 'Hour']):
             raise HTTPException(status_code=400, detail="Erreur : Les colonnes 'Year', 'Month', 'Day', 'Hour' sont manquantes.")
 
-        # Reconstituer la colonne 'Timestamp' à partir des colonnes 'Year', 'Month', 'Day', 'Hour'
-        df['Timestamp'] = pd.to_datetime(df[['Year', 'Month', 'Day', 'Hour']])
+        # Reconstituer la colonne 'Timestamp'
+        df['Timestamp'] = pd.to_datetime(df[['Year', 'Month', 'Day', 'Hour']], errors='coerce')
 
-        # Vérifier si la colonne 'Timestamp' a bien été reconstituée
-        if 'Timestamp' not in df.columns:
-            raise HTTPException(status_code=400, detail="Erreur : La colonne 'Timestamp' est absente après la reconstitution.")
+        if 'Timestamp' not in df.columns or df['Timestamp'].isnull().all():
+            raise HTTPException(status_code=400, detail="Erreur : La colonne 'Timestamp' est absente ou contient des valeurs invalides.")
 
-        # Stocker les données chargées
-        data_cache = df  # Enregistrer les données dans la variable globale
+        # Enregistrer les données
+        data_cache = df
 
-        # Déboguer : Afficher les types de données des colonnes pour voir si la colonne 'Timestamp' est correcte
-        print("Types de données des colonnes après reconstitution de 'Timestamp' :")
-        print(df.dtypes)
+        # Sauvegarder dans InfluxDB
+        save_data_to_influxdb(df)
 
-        # Convertir le DataFrame en dictionnaire (incluant la colonne 'Timestamp' et autres colonnes utiles)
+        # Retourner les données sous forme de dictionnaire
         data_dict = df[['Timestamp', 'Temperature', 'Humidity', 'SquareFootage', 'Occupancy', 'RenewableEnergy', 'EnergyConsumption']].head().to_dict(orient="records")
-
-        # Retourner les données au format JSON
         return {"data": data_dict}
 
     except Exception as e:
-        # Déboguer : Afficher l'exception complète pour aider à identifier le problème
-        print(f"Exception capturée : {e}")
+        print(f"❌ Exception capturée : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors du chargement des données : {e}")
 
 

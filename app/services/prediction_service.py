@@ -34,7 +34,7 @@ def apply_arima_model(data, steps=30):
     series = data.set_index('Timestamp')['EnergyConsumption']
     
     # Appliquer ARIMA pour prédire les prochaines valeurs
-    model = ARIMA(series, order=(10 , 1, 0))  # (p, d, q) : vous pouvez ajuster ces paramètres
+    model = ARIMA(series, order=(10, 1, 0))  # (p, d, q) : vous pouvez ajuster ces paramètres
     model_fit = model.fit()
 
     # Générer les prévisions pour les prochaines 'steps' jours

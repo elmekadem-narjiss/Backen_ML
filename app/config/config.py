@@ -6,7 +6,7 @@ REDIS_PORT = os.getenv("REDIS_PORT", 6379)
 
 # Configurations InfluxDB
 INFLUX_URL = os.getenv("INFLUX_URL", "http://localhost:8086")
-INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "6gVj-CNfMCVW0otLynlsr2-E4WTfI-ww6Z2QV0NSe-LrYfVHpFCnfGf-XUNtQ31_9CJna40ifv67fKRnKfoDnKAg==")
+INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "6gVj-CNfMCVW0otLynr2-E4WTfI-ww6Z2QV0NSe-LrYfVHpFCnfGf-XUNtQ31_9CJna40ifv67fKRnKfoDnKAg==")
 INFLUX_ORG = os.getenv("INFLUX_ORG", "iot_lab")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "energy_data")
 
