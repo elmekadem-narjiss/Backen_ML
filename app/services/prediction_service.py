@@ -5,21 +5,10 @@ from statsmodels.tsa.arima.model import ARIMA
 import psycopg2
 import os
 from pydantic import BaseModel
+from app.config.config import INFLUX_URL, INFLUX_ORG,INFLUX_TOKEN,PG_DBNAME,PG_USER,PG_PASSWORD,PG_HOST,PG_PORT
+
 
 app = FastAPI()
-
-# Configurations PostgreSQL
-PG_DBNAME = os.getenv("PG_DBNAME", "energy_db")
-PG_USER = os.getenv("PG_USER", "admin")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "admin123")
-PG_HOST = os.getenv("PG_HOST", "localhost")
-PG_PORT = os.getenv("PG_PORT", 5432)
-
-# Configurations InfluxDB
-INFLUX_URL = "http://localhost:8086"
-INFLUX_TOKEN = "6gVj-CNfMCVW0otLynr2-E4WTfI-ww6Z2QV0NSe-LrYfVHpFCnfGf-XUNtQ31_9CJna40ifv67fKRnKfoDnKAg=="
-INFLUX_ORG = "iot_lab"
-INFLUX_BUCKET = "energy_data"
 
 def connect_postgresql():
     """Connexion à PostgreSQL"""
