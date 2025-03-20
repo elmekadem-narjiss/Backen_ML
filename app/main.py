@@ -1,10 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from pathlib import Path
 from app.utils.time_series import load_energy_consumption_data ,save_data_to_influxdb
-from app.services.prediction_service import apply_arima_model
+from app.services.prediction_service import apply_arima_model,save_predictions_to_postgres,get_influx_data,connect_postgresql
 import pandas as pd
 import numpy as np
 from statsmodels.tsa.arima.model import ARIMA
+from pydantic import BaseModel
 import os
 
 app = FastAPI()
@@ -79,3 +80,50 @@ def forecast_data():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération des prévisions : {e}")
+    
+
+
+class PredictionRequest(BaseModel):
+    steps: int = 30
+
+@app.post("/predict")
+async def predict(request: PredictionRequest):
+    """Endpoint pour récupérer les données, faire une prédiction et enregistrer les résultats."""
+    
+    # Étape 1 : Charger les données depuis InfluxDB
+    data = get_influx_data()
+    
+    print("Données récupérées :", data)  # Ajout pour voir les données
+    
+    # Vérification
+    if "energyConsumption" not in data.columns:
+        raise ValueError("Les données récupérées ne contiennent pas 'energyConsumption'.")
+
+    # Étape 2 : Appliquer le modèle ARIMA pour prédire
+    forecast_df = apply_arima_model(data, steps=request.steps)
+
+    # Étape 3 : Enregistrer les prévisions dans PostgreSQL
+    save_predictions_to_postgres(forecast_df)
+
+    return {"message": "Les prévisions ont été générées et enregistrées avec succès."}
+
+
+
+
+@app.get("/predictions")
+async def get_predictions():
+    """Endpoint pour récupérer les prévisions enregistrées dans PostgreSQL"""
+    conn = connect_postgresql()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT timestamp, forecast FROM predictions ORDER BY timestamp DESC")
+    data = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    if not data:
+        return {"message": "Aucune prévision disponible."}
+
+    predictions = [{"timestamp": row[0], "forecast": row[1]} for row in data]
+    return {"predictions": predictions}
