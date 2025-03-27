@@ -5,3 +5,6 @@ numpy
 statsmodels
 sqlalchemy
 pydantic
+psycopg2
+sqlalchemy
+influxdb-client

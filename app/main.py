@@ -7,6 +7,15 @@ import numpy as np
 from statsmodels.tsa.arima.model import ARIMA
 from pydantic import BaseModel
 import os
+from app.services.enrich_data import add_time_features,load_data_from_postgres,save_to_influx
+from app.config.config import INFLUX_URL, INFLUX_ORG,INFLUX_TOKEN,INFLUX_BUCKET
+from influxdb_client import InfluxDBClient
+import logging
+#from app.services.lstm_model import get_influxdb_client,load_data_from_influx,prepare_data_for_lstm,train_lstm
+
+
+#from app.services.lstm_model import get_influxdb_client,load_data_from_influx,train_lstm,prepare_data_for_lstm
+
 
 app = FastAPI()
 
@@ -30,9 +39,10 @@ def load_data():
         if not os.path.exists(str(FILE_CSV)):  # Vérifier si le fichier existe
             raise HTTPException(status_code=404, detail="Fichier introuvable. Vérifiez le chemin.")
 
-        # Charger les données
-        df = load_energy_consumption_data(str(FILE_CSV))
+        # Charger les données et récupérer le nombre de lignes
+        df, nombre_de_lignes = load_energy_consumption_data(str(FILE_CSV))
 
+        print(f"✅ {nombre_de_lignes} lignes chargées après nettoyage.")
         print("🔍 Vérification des premières lignes du DataFrame...")
         print(df.head())
 
@@ -52,35 +62,67 @@ def load_data():
         # Sauvegarder dans InfluxDB
         save_data_to_influxdb(df)
 
-        # Retourner les données sous forme de dictionnaire
+        # Retourner les données sous forme de dictionnaire avec le nombre de lignes
         data_dict = df[['Timestamp', 'Temperature', 'Humidity', 'SquareFootage', 'Occupancy', 'RenewableEnergy', 'EnergyConsumption']].head().to_dict(orient="records")
-        return {"data": data_dict}
+        return {"nombre_de_lignes": nombre_de_lignes, "data": data_dict}
 
     except Exception as e:
         print(f"❌ Exception capturée : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors du chargement des données : {e}")
+    
 
+
+
+
+# Configuration du logging
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
 @app.get("/forecast")
 def forecast_data():
     """
-    Route pour effectuer des prévisions sur les données de consommation d'énergie.
+    Route pour effectuer des prévisions et les enregistrer dans PostgreSQL.
     """
-    global data_cache  # On suppose que les données sont déjà chargées dans `data_cache`
+    global data_cache  # Supposons que les données sont déjà chargées
 
     if data_cache is None:
         raise HTTPException(status_code=400, detail="Les données doivent d'abord être chargées via /load-data.")
 
-    try:
-        # Appliquer ARIMA sur les données chargées
-        forecast_df = apply_arima_model(data_cache, steps=30)
+    # Nettoyage des colonnes
+    data_cache.columns = data_cache.columns.str.strip()
+    logging.debug(f"Noms des colonnes après nettoyage : {list(data_cache.columns)}")
 
-        # Retourner les 10 dernières lignes (y compris les prévisions)
-        return {"forecast": forecast_df.tail(10).to_dict(orient="records")}  # Utilisation de 'orient="records"' pour une réponse lisible
+    # Trouver la colonne 'energyConsumption'
+    column_name = next((col for col in data_cache.columns if col.lower() == "energyconsumption"), None)
+
+    if column_name is None:
+        logging.error("Erreur : la colonne 'energyConsumption' est absente des données.")
+        raise HTTPException(status_code=400, detail="Les données doivent contenir la colonne 'energyConsumption'.")
+
+    if data_cache[column_name].isnull().any():
+        logging.error("Erreur : La colonne 'energyConsumption' contient des valeurs manquantes.")
+        raise HTTPException(status_code=400, detail="La colonne 'energyConsumption' contient des valeurs manquantes.")
+
+    try:
+        # Appliquer ARIMA pour générer des prévisions
+        forecast_df = apply_arima_model(data_cache.rename(columns={column_name: "energyConsumption"}), steps=120)
+        logging.info(f"Nombre de prédictions générées : {len(forecast_df)}")
+
+        # Renommer les colonnes pour correspondre à la base de données
+        forecast_df = forecast_df.rename(columns={"date": "Timestamp", "predicted": "Forecast"})
+
+        # Sauvegarder dans PostgreSQL
+        save_predictions_to_postgres(forecast_df)
+
+        return {"message": "Prévisions générées et enregistrées avec succès.", "forecast": forecast_df.tail(10).to_dict(orient="records")}
 
     except Exception as e:
+        logging.exception("Erreur lors de la génération des prévisions")
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération des prévisions : {e}")
-    
+
+
+
+
+
 
 
 class PredictionRequest(BaseModel):
@@ -108,8 +150,7 @@ async def predict(request: PredictionRequest):
     return {"message": "Les prévisions ont été générées et enregistrées avec succès."}
 
 
-
-
+#Vlaue in  Postgres 
 @app.get("/predictions")
 async def get_predictions():
     """Endpoint pour récupérer les prévisions enregistrées dans PostgreSQL"""
@@ -127,3 +168,79 @@ async def get_predictions():
 
     predictions = [{"timestamp": row[0], "forecast": row[1]} for row in data]
     return {"predictions": predictions}
+
+
+
+
+@app.get("/sync-postgres-to-influx")
+def sync_postgres_to_influx():
+    """
+    Endpoint pour synchroniser les données de PostgreSQL vers InfluxDB.
+    """
+    try:
+        # Charger les données depuis PostgreSQL
+        df = load_data_from_postgres()
+
+        if df.empty:
+            raise HTTPException(status_code=404, detail="Aucune donnée trouvée dans PostgreSQL.")
+
+        # Ajouter les variables temporelles
+        df = add_time_features(df)
+
+        # Afficher le nombre total de lignes après l'ajout des variables temporelles
+        logging.debug(f"Nombre total de lignes après ajout des variables temporelles : {len(df)}")
+
+        # Sauvegarder les données dans InfluxDB
+        save_to_influx(df)
+
+        # Retourner un aperçu des nouvelles données
+        return {
+            "message": "Données synchronisées avec succès.",
+            "preview": df.head().to_dict(orient="records"),
+            "total_rows": len(df)  # Ajouter le nombre total de lignes traitées
+        }
+
+    except Exception as e:
+        logging.error(f"Erreur lors de la synchronisation : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la synchronisation : {e}")
+
+
+@app.get("/get-influx-data")
+def get_influx_data():
+    """
+    Endpoint pour récupérer les données enregistrées dans InfluxDB et compter le nombre de lignes.
+    """
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        query_api = client.query_api()
+
+        query = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: 0)
+          |> filter(fn: (r) => r._measurement == "energy_data")
+        '''
+        tables = query_api.query(query, org=INFLUX_ORG)
+
+        results = []
+        for table in tables:
+            for record in table.records:
+                results.append({
+                    "timestamp": record.get_time(),
+                    "forecast": record.get_value(),
+                    "field": record.get_field()
+                })
+
+        client.close()
+
+        nombre_de_lignes = len(results)  # ✅ Nombre total de lignes récupérées
+
+        if not results:
+            return {"message": "Aucune donnée trouvée dans InfluxDB.", "nombre_de_lignes": 0}
+
+        return {"nombre_de_lignes": nombre_de_lignes, "data": results}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des données InfluxDB : {e}")
+
+
+

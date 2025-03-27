@@ -142,9 +142,11 @@ def load_energy_consumption_data(file_path: str):
         # Suppression des colonnes non numériques
         df = df.select_dtypes(include=[np.number])
 
-        print("Données chargées et nettoyées :")
-        print(df.head())
-        return df
+        # Affichage du nombre de lignes après nettoyage
+        nombre_de_lignes = len(df)
+        print(f"Nombre de lignes après nettoyage : {nombre_de_lignes}")
+
+        return df, nombre_de_lignes
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur lors du chargement des données : {e}")
 
