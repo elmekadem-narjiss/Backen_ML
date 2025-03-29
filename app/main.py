@@ -74,7 +74,7 @@ def load_data():
 
 
 
-# Configuration du logging
+## Configuration du logging
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
 @app.get("/forecast")
@@ -104,7 +104,9 @@ def forecast_data():
 
     try:
         # Appliquer ARIMA pour générer des prévisions
-        forecast_df = apply_arima_model(data_cache.rename(columns={column_name: "energyConsumption"}), steps=120)
+        forecast_df = apply_arima_model(data_cache.rename(columns={column_name: "energyConsumption"}), steps=1000)
+        
+        # Ajouter un log pour le nombre de prédictions générées
         logging.info(f"Nombre de prédictions générées : {len(forecast_df)}")
 
         # Renommer les colonnes pour correspondre à la base de données
@@ -118,7 +120,6 @@ def forecast_data():
     except Exception as e:
         logging.exception("Erreur lors de la génération des prévisions")
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération des prévisions : {e}")
-
 
 
 
@@ -217,7 +218,8 @@ def get_influx_data():
         query = f'''
         from(bucket: "{INFLUX_BUCKET}")
           |> range(start: 0)
-          |> filter(fn: (r) => r._measurement == "energy_data")
+          |> filter(fn: (r) => r._measurement == "environment_data")
+          |> filter(fn: (r) => r._field == "energyConsumption")
         '''
         tables = query_api.query(query, org=INFLUX_ORG)
 

@@ -56,7 +56,7 @@ def get_influx_data():
     
 
 
-def apply_arima_model(data, steps=120):
+def apply_arima_model(data, steps=1000):
     """Applique ARIMA et génère des prévisions"""
     try:
         logging.debug(f"Nombre de jours de prévision demandés : {steps}")
