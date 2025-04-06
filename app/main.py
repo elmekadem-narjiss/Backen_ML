@@ -22,7 +22,8 @@ app = FastAPI()
 
 # Définir le chemin du fichier de données
 DATASET_DIR = Path("D:/PFE/DataSet")
-FILE_CSV = DATASET_DIR / "Energy_consumption.csv"
+#FILE_CSV = DATASET_DIR / "Energy_consumption.csv"
+FILE_CSV = "D:/PFE/DataSet/Energy_consumption.csv"
 data_cache = None  # Stocke les données après /load-data
 
 @app.get("/")
@@ -70,12 +71,6 @@ def load_data():
         print(f"❌ Exception capturée : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors du chargement des données : {e}")
     
-
-# Configuration du logging
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# Cache pour stocker les données chargées
-data_cache = None  
 
 @app.get("/forecast")
 def forecast_data():

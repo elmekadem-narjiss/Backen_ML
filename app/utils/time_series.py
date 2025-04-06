@@ -151,8 +151,12 @@ def load_energy_consumption_data(file_path: str):
         raise HTTPException(status_code=500, detail=f"Erreur lors du chargement des données : {e}")
 
 # Exemple d'appel pour charger les données depuis le fichier CSV
-file_path = "D:/PFE/DataSet/Energy_consumption.csv"
-df = load_energy_consumption_data(file_path)
+# Exemple d'appel pour tester manuellement le chargement du fichier CSV
+if __name__ == "__main__":
+    file_path = "D:/PFE/DataSet/Energy_consumption.csv"
+    df, n = load_energy_consumption_data(file_path)
+    print(df.head())
+
 
 # Appel de la fonction pour démarrer la connexion MQTT au démarrage de l'application
 @app.on_event("startup")
