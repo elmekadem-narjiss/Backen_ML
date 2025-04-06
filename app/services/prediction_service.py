@@ -6,6 +6,8 @@ import psycopg2
 import logging
 from app.config.config import INFLUX_URL, INFLUX_ORG, INFLUX_TOKEN, PG_DBNAME, PG_USER, PG_PASSWORD, PG_HOST, PG_PORT
 from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+import numpy as np
 
 # Configuration du logger
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -56,61 +58,153 @@ def get_influx_data():
     
 
 
+
+
+
+def check_stationarity(series):
+    """
+    Vérifie si la série temporelle est stationnaire en utilisant le test de Dickey-Fuller.
+    """
+    result = adfuller(series)
+    p_value = result[1]
+    # Retourne True si la p-value est inférieure à 0.05, ce qui indique une série stationnaire
+    return p_value < 0.05
+
+
+
+
+
 def apply_arima_model(data, steps=1000):
-    """Applique ARIMA et génère des prévisions"""
+    """
+    Applique un modèle SARIMAX pour les prévisions en respectant les dates du dataset.
+    Gère correctement les timestamps et les variables exogènes (température et humidité).
+    """
     try:
-        logging.debug(f"Nombre de jours de prévision demandés : {steps}")
+        # Nettoyage des colonnes (enlever les espaces et rendre tout en minuscules)
+        data.columns = data.columns.str.strip().str.lower()
 
-        if 'energyConsumption' not in data.columns:
-            raise ValueError("Les données doivent contenir la colonne 'energyConsumption'.")
+        # Vérifier si 'energyconsumption' existe et le renommer
+        if 'energyconsumption' in data.columns:
+            data.rename(columns={'energyconsumption': 'energyproduced'}, inplace=True)
 
-        if data.empty:
-            raise ValueError("Les données ne peuvent pas être vides.")
+        # Vérifier que 'timestamp' est bien au format datetime
+        data['timestamp'] = pd.to_datetime(data['timestamp'], errors='coerce')
 
-        data['Timestamp'] = pd.to_datetime(data['Timestamp'])
-        data = data.sort_values(by='Timestamp')
-        data = data.set_index('Timestamp').asfreq('D')  # Assurer une fréquence correcte
+        # Vérifier la dernière date du dataset
+        last_timestamp = data['timestamp'].max()
+        if pd.isna(last_timestamp):
+            logging.error("Erreur : Aucune date valide détectée.")
+            raise HTTPException(status_code=400, detail="Aucune date valide détectée.")
 
-        logging.info(f"Nombre de points de données pour ARIMA : {len(data)}")
+        logging.debug(f"Dernière date détectée : {last_timestamp}")
 
-        series = data['energyConsumption']
+        # Générer un index de prévision basé sur la dernière date connue
+        future_index = pd.date_range(start=last_timestamp + pd.Timedelta(days=1), periods=steps, freq='D')
 
-        model = ARIMA(series, order=(10, 1, 0))
-        model_fit = model.fit()
+        # Vérifier que les colonnes nécessaires sont présentes
+        required_columns = ['timestamp', 'temperature', 'humidity', 'energyproduced']
+        missing_columns = [col for col in required_columns if col not in data.columns]
+        if missing_columns:
+            logging.error(f"Colonnes manquantes : {missing_columns}")
+            raise HTTPException(status_code=400, detail=f"Colonnes manquantes : {missing_columns}")
 
-        logging.debug(f"Génération des prévisions pour {steps} jours...")
-        forecast = model_fit.forecast(steps=steps)
+        # Supprimer les lignes contenant des valeurs manquantes
+        data.dropna(subset=required_columns, inplace=True)
 
-        logging.info(f"Nombre de valeurs prédites : {len(forecast)}")  # Vérification
+        # Définir la variable cible et les variables exogènes
+        y = data['energyproduced']
+        exog = data[['temperature', 'humidity']]
 
-        forecast_dates = pd.date_range(start=data.index[-1], periods=steps + 1, freq='D')[1:]
+        # Modèle SARIMAX avec exogènes
+        model = SARIMAX(y, exog=exog, order=(1, 1, 1), seasonal_order=(1, 1, 1, 12))
+        model_fit = model.fit(maxiter=1000, method='powell')
 
-        logging.debug(f"Dates de prévision générées : {forecast_dates}")  # Vérification
+        # Générer des valeurs exogènes futures (si elles ne sont pas prédites)
+        future_temperature = np.random.uniform(data['temperature'].min(), data['temperature'].max(), steps)
+        future_humidity = np.random.uniform(data['humidity'].min(), data['humidity'].max(), steps)
 
-        forecast_df = pd.DataFrame({'Timestamp': forecast_dates, 'Forecast': forecast.values})
+        # Créer un DataFrame pour les variables exogènes futures
+        future_exog = pd.DataFrame({'temperature': future_temperature, 'humidity': future_humidity})
 
-        logging.info(f"Prévisions générées avec succès pour {steps} jours.")
-        return forecast_df
+        # Faire les prévisions avec les exogènes futures
+        forecast = model_fit.forecast(steps=steps, exog=future_exog)
+
+        # Construire le DataFrame final avec les prévisions et exogènes
+        forecast_df = pd.DataFrame({
+            "Timestamp": future_index,
+            "Temperature": future_temperature,
+            "Humidity": future_humidity,
+            "EnergyProduced": forecast.values
+        })
+
+        # Formatage de la réponse JSON
+        forecast_json = {
+            "nombre_de_lignes": len(forecast_df),
+            "data": forecast_df.to_dict(orient="records")
+        }
+
+        # Vérification avant d'envoyer à PostgreSQL
+        if "data" in forecast_json and isinstance(forecast_json["data"], list):
+            save_predictions_to_postgres(forecast_json)
+        else:
+            logging.error("Format invalide de forecast_json avant sauvegarde")
+            raise HTTPException(status_code=500, detail="Format invalide de forecast_json avant sauvegarde")
+
+        return forecast_json
+
     except Exception as e:
         logging.error(f"Erreur lors de l'application du modèle ARIMA : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur ARIMA : {e}")
 
 
 
-def save_predictions_to_postgres(predictions_df):
-    """Enregistre les prévisions dans PostgreSQL"""
+def save_predictions_to_postgres(forecast_json):
+    """
+    Sauvegarde des prévisions dans PostgreSQL en utilisant connect_postgresql().
+    """
     try:
+        # Vérification de la structure des données
+        if not isinstance(forecast_json, dict) or "data" not in forecast_json:
+            logging.error("Format invalide de forecast_json reçu dans save_predictions_to_postgres")
+            raise HTTPException(status_code=500, detail="Format invalide de forecast_json")
+
+        # Création du DataFrame à partir des prévisions
+        data_cache = pd.DataFrame(forecast_json['data'])
+
+        # Afficher les colonnes du DataFrame pour le débogage
+        logging.debug(f"Colonnes présentes dans les données : {data_cache.columns.tolist()}")
+
+        # Vérifier que toutes les colonnes nécessaires sont présentes
+        expected_columns = ['Timestamp', 'Temperature', 'Humidity', 'EnergyProduced']
+        missing_columns = [col for col in expected_columns if col not in data_cache.columns]
+
+        if missing_columns:
+            logging.error(f"Erreur : Colonnes manquantes {missing_columns}")
+            raise HTTPException(status_code=400, detail=f"Colonnes manquantes : {missing_columns}")
+
+        # Connexion à PostgreSQL
         conn = connect_postgresql()
         cursor = conn.cursor()
-        logging.debug("Insertion des prévisions dans PostgreSQL...")
 
-        for _, row in predictions_df.iterrows():
-            cursor.execute("INSERT INTO predictions (timestamp, forecast) VALUES (%s, %s)", (row['Timestamp'], row['Forecast']))
+        # Préparation de la requête d'insertion
+        insert_query = """
+        INSERT INTO predictions (timestamp, temperature, humidity, energyproduced) 
+        VALUES (%s, %s, %s, %s);
+        """
 
+        # Convertir DataFrame en liste de tuples pour exécution rapide
+        records_to_insert = list(data_cache.itertuples(index=False, name=None))
+
+        # Insérer les données
+        cursor.executemany(insert_query, records_to_insert)
         conn.commit()
+
+        logging.info(f"Prévisions sauvegardées avec succès. Nombre de lignes : {len(records_to_insert)}")
+
+        # Fermer la connexion
         cursor.close()
         conn.close()
-        logging.info("Les prévisions ont été enregistrées dans PostgreSQL avec succès.")
+
     except Exception as e:
         logging.error(f"Erreur lors de l'enregistrement des prévisions : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur PostgreSQL : {e}")

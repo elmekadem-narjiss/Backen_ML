@@ -7,7 +7,7 @@ import numpy as np
 from statsmodels.tsa.arima.model import ARIMA
 from pydantic import BaseModel
 import os
-from app.services.enrich_data import add_time_features,load_data_from_postgres,save_to_influx
+from app.services.enrich_data import add_time_features,load_data_from_postgres,save_to_influx,query_influx
 from app.config.config import INFLUX_URL, INFLUX_ORG,INFLUX_TOKEN,INFLUX_BUCKET
 from influxdb_client import InfluxDBClient
 import logging
@@ -71,59 +71,82 @@ def load_data():
         raise HTTPException(status_code=500, detail=f"Erreur lors du chargement des données : {e}")
     
 
-
-
-
-## Configuration du logging
+# Configuration du logging
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Cache pour stocker les données chargées
+data_cache = None  
 
 @app.get("/forecast")
 def forecast_data():
     """
-    Route pour effectuer des prévisions et les enregistrer dans PostgreSQL.
+    Route pour effectuer des prévisions avec SARIMAX et les enregistrer dans PostgreSQL.
     """
-    global data_cache  # Supposons que les données sont déjà chargées
+    global data_cache  
 
+    # Vérification de la présence de données
     if data_cache is None:
-        raise HTTPException(status_code=400, detail="Les données doivent d'abord être chargées via /load-data.")
+        raise HTTPException(status_code=400, detail="Les données doivent d'abord être chargées via /load-data")
 
-    # Nettoyage des colonnes
-    data_cache.columns = data_cache.columns.str.strip()
+    # Nettoyage des colonnes : enlever les espaces et convertir en minuscules
+    data_cache.columns = data_cache.columns.str.strip().str.lower()
     logging.debug(f"Noms des colonnes après nettoyage : {list(data_cache.columns)}")
 
-    # Trouver la colonne 'energyConsumption'
-    column_name = next((col for col in data_cache.columns if col.lower() == "energyconsumption"), None)
+    # Vérification des colonnes obligatoires
+    required_columns = ["timestamp", "energyconsumption", "temperature", "humidity"]
+    missing_columns = [col for col in required_columns if col not in data_cache.columns]
 
-    if column_name is None:
-        logging.error("Erreur : la colonne 'energyConsumption' est absente des données.")
-        raise HTTPException(status_code=400, detail="Les données doivent contenir la colonne 'energyConsumption'.")
+    if missing_columns:
+        logging.error(f"Erreur : Colonnes manquantes {missing_columns}")
+        raise HTTPException(status_code=400, detail=f"Colonnes manquantes : {missing_columns}")
 
-    if data_cache[column_name].isnull().any():
-        logging.error("Erreur : La colonne 'energyConsumption' contient des valeurs manquantes.")
-        raise HTTPException(status_code=400, detail="La colonne 'energyConsumption' contient des valeurs manquantes.")
+    # Renommage de 'energyconsumption' en 'energyproduced'
+    data_cache.rename(columns={"energyconsumption": "energyproduced"}, inplace=True)
+
+    # Assurer que 'timestamp' est bien une colonne datetime
+    data_cache["timestamp"] = pd.to_datetime(data_cache["timestamp"], errors="coerce")
+
+    # Vérifier les valeurs manquantes
+    if data_cache["timestamp"].isnull().any():
+        logging.error("Erreur : La colonne 'timestamp' contient des valeurs invalides.")
+        raise HTTPException(status_code=400, detail="La colonne 'timestamp' contient des valeurs invalides.")
+
+    if data_cache["energyproduced"].isnull().any():
+        logging.error("Erreur : La colonne 'energyproduced' contient des valeurs manquantes.")
+        raise HTTPException(status_code=400, detail="La colonne 'energyproduced' contient des valeurs manquantes.")
 
     try:
-        # Appliquer ARIMA pour générer des prévisions
-        forecast_df = apply_arima_model(data_cache.rename(columns={column_name: "energyConsumption"}), steps=1000)
-        
-        # Ajouter un log pour le nombre de prédictions générées
-        logging.info(f"Nombre de prédictions générées : {len(forecast_df)}")
+        num_data_points = len(data_cache)
+        logging.debug(f"Nombre de points de données disponibles : {num_data_points}")
 
-        # Renommer les colonnes pour correspondre à la base de données
-        forecast_df = forecast_df.rename(columns={"date": "Timestamp", "predicted": "Forecast"})
+        # Conversion de 'energyproduced' en numérique
+        data_cache["energyproduced"] = pd.to_numeric(data_cache["energyproduced"], errors='coerce')
+        data_cache.dropna(subset=["energyproduced"], inplace=True)
 
-        # Sauvegarder dans PostgreSQL
-        save_predictions_to_postgres(forecast_df)
+        # Sélection des variables exogènes
+        exog_variables = data_cache[['temperature', 'humidity']]
 
-        return {"message": "Prévisions générées et enregistrées avec succès.", "forecast": forecast_df.tail(10).to_dict(orient="records")}
+        if not pd.api.types.is_numeric_dtype(data_cache["energyproduced"]):
+            raise HTTPException(status_code=400, detail="La colonne 'energyproduced' doit être numérique.")
+
+        # Application du modèle SARIMAX
+        logging.info("Début de la génération des prévisions avec SARIMAX...")
+        forecast_json = apply_arima_model(data_cache, steps=1000)
+
+        # Log du nombre de prédictions générées
+        logging.info(f"Nombre de prédictions générées : {forecast_json['nombre_de_lignes']}")
+
+        # Sauvegarde des prévisions dans PostgreSQL
+        save_predictions_to_postgres(forecast_json)
+
+        return {
+            "message": "Prévisions générées et enregistrées avec succès.",
+            "forecast": forecast_json
+        }
 
     except Exception as e:
         logging.exception("Erreur lors de la génération des prévisions")
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération des prévisions : {e}")
-
-
-
-
 
 
 class PredictionRequest(BaseModel):
@@ -149,6 +172,9 @@ async def predict(request: PredictionRequest):
     save_predictions_to_postgres(forecast_df)
 
     return {"message": "Les prévisions ont été générées et enregistrées avec succès."}
+
+
+
 
 
 #Vlaue in  Postgres 
@@ -245,4 +271,41 @@ def get_influx_data():
         raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des données InfluxDB : {e}")
 
 
+#Enrichi
+@app.get("/data")
+async def get_data():
+    """Endpoint pour récupérer les données depuis InfluxDB et afficher toutes les étapes du processus ETL"""
+    try:
+        logging.info("Début du processus ETL pour récupérer et afficher les données...")
 
+        # Charger les données depuis PostgreSQL
+        df = load_data_from_postgres()
+        row_count = len(df)
+
+        if df.empty:
+            logging.info("Aucune donnée disponible dans PostgreSQL.")
+            return {"message": "Aucune donnée disponible dans PostgreSQL.", "count_postgres": 0}
+
+        logging.info(f"{row_count} lignes chargées depuis PostgreSQL avec succès.")
+
+        # Ajouter les variables temporelles
+        df = add_time_features(df)
+        logging.info("Variables temporelles ajoutées aux données.")
+
+        # Sauvegarder les données dans InfluxDB
+        save_to_influx(df)
+        logging.info("Données sauvegardées dans InfluxDB.")
+
+        # Récupérer les données enrichies depuis InfluxDB
+        data = query_influx()
+
+        # Retourner les données récupérées depuis InfluxDB
+        return {
+            "data": data,
+            "count_postgres": row_count,
+            "count_influx": len(data)
+        }
+
+    except Exception as e:
+        logging.error(f"Erreur critique dans le processus ETL : {e}")
+        return {"error": f"Une erreur s'est produite lors du processus ETL : {e}"}

@@ -1,94 +1,186 @@
-import psycopg2
 import pandas as pd
-from app.config.config import PG_DBNAME, PG_USER, PG_PASSWORD, PG_HOST, PG_PORT
-from influxdb_client import InfluxDBClient, Point, WritePrecision, WriteOptions
-from app.config.config import INFLUX_URL, INFLUX_ORG, INFLUX_TOKEN, INFLUX_BUCKET
-
 import logging
 from sqlalchemy import create_engine
+from influxdb_client import InfluxDBClient, Point, WritePrecision, WriteOptions
+from influxdb_client.client.write_api import SYNCHRONOUS
+from app.config.config import (
+    PG_DBNAME, PG_USER, PG_PASSWORD, PG_HOST, PG_PORT,
+    INFLUX_URL, INFLUX_ORG, INFLUX_TOKEN, INFLUX_BUCKET
+)
 
 # Configuration des logs
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def get_postgres_connection():
-    """Établit une connexion à PostgreSQL via SQLAlchemy"""
     try:
-        logging.debug(f"Essai de connexion à PostgreSQL sur {PG_HOST}:{PG_PORT} avec la base de données {PG_DBNAME}")
+        logging.debug(f"Connexion PostgreSQL sur {PG_HOST}:{PG_PORT} - DB: {PG_DBNAME}")
         engine = create_engine(f'postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DBNAME}')
-        logging.debug("Connexion PostgreSQL réussie.")
         return engine
     except Exception as e:
-        logging.error(f"Erreur lors de la connexion à PostgreSQL : {e}")
+        logging.error(f"Erreur de connexion PostgreSQL : {e}")
         raise
 
 def load_data_from_postgres():
-    """Charge les données depuis PostgreSQL dans un DataFrame Pandas"""
     try:
-        query = "SELECT timestamp, forecast FROM predictions ORDER BY timestamp ASC"
-        logging.debug(f"Exécution de la requête PostgreSQL : {query}")
+        query = "SELECT timestamp, temperature, humidity, energyproduced FROM predictions ORDER BY timestamp ASC"
+        logging.debug(f"Requête SQL : {query}")
         conn = get_postgres_connection()
         df = pd.read_sql(query, conn)
-        logging.debug(f"Nombre de lignes récupérées depuis PostgreSQL : {len(df)}")
-        conn.dispose()  # Fermer la connexion après utilisation
-        if df.empty:
-            logging.warning("Aucune donnée trouvée dans la base de données PostgreSQL.")
+        conn.dispose()
+        logging.info(f"{len(df)} lignes chargées depuis PostgreSQL.")
+
+        # Vérification des doublons et suppression
+        if df.duplicated(subset=['timestamp']).any():
+            logging.warning("Des doublons ont été détectés dans les données et seront supprimés.")
+            df = df.drop_duplicates(subset=['timestamp'])
+        
         return df
     except Exception as e:
-        logging.error(f"Erreur lors du chargement des données depuis PostgreSQL : {e}")
+        logging.error(f"Erreur lors du chargement des données : {e}")
         raise
 
+
+
 def add_time_features(df):
-    """Ajoute des variables temporelles à un DataFrame"""
+    """Ajoute des variables temporelles au DataFrame uniquement pour les enregistrements à 15:00:00 UTC"""
     try:
         logging.debug("Ajout des variables temporelles au DataFrame.")
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        
+        # Conversion de timestamp en datetime, gestion des valeurs nulles
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')  # 'coerce' convertit les valeurs invalides en NaT
+        if df['timestamp'].isnull().any():
+            logging.warning("Des valeurs de 'timestamp' sont nulles après conversion, elles seront supprimées.")
+            df = df.dropna(subset=['timestamp'])  # Supprimer les lignes avec des timestamp manquants
+        
+        # Filtrer les enregistrements pour n'inclure que ceux ayant 15:00:00 UTC
+        df = df[df['timestamp'].dt.hour == 15]
+        df = df[df['timestamp'].dt.minute == 0]
+        df = df[df['timestamp'].dt.second == 0]
+        
+        # Ajout des variables temporelles
         df['hour'] = df['timestamp'].dt.hour
         df['day_of_week'] = df['timestamp'].dt.dayofweek
         df['month'] = df['timestamp'].dt.month
         df['week_of_year'] = df['timestamp'].dt.isocalendar().week
-        logging.debug(f"Variables temporelles ajoutées : {df[['timestamp', 'hour', 'day_of_week', 'month', 'week_of_year']].head()}")
+        
+        logging.debug(f"Variables temporelles ajoutées : {df.head()}")
         return df
     except Exception as e:
         logging.error(f"Erreur lors de l'ajout des variables temporelles : {e}")
         raise
 
+def clear_old_data():
+    try:
+        logging.debug("Suppression des anciennes données d'InfluxDB...")
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        delete_api = client.delete_api()
+
+        from datetime import datetime, timedelta
+        start = datetime.utcnow() - timedelta(days=30)
+        stop = datetime.utcnow()
+
+        delete_api.delete(
+            start=start,
+            stop=stop,
+            predicate='_measurement="energy_data"',
+            bucket=INFLUX_BUCKET,
+            org=INFLUX_ORG
+        )
+        logging.info("Anciennes données supprimées d'InfluxDB.")
+        client.close()
+    except Exception as e:
+        logging.error(f"Erreur suppression InfluxDB : {e}")
+        raise
 
 def save_to_influx(df):
-    """Sauvegarde un DataFrame Pandas dans InfluxDB avec gestion d'erreur et options de batch."""
     try:
-        logging.debug("Connexion à InfluxDB...")
+        logging.debug("Connexion à InfluxDB pour sauvegarde...")
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-        if client is None:
-            logging.error("Impossible de se connecter à InfluxDB.")
-            return
+        write_api = client.write_api(write_options=SYNCHRONOUS)
 
-        write_api = client.write_api(write_options=WriteOptions(batch_size=1000, flush_interval=10_000))
-        logging.debug("Connexion à InfluxDB réussie.")
-        
-        # Nettoyage des doublons
+        # Suppression des doublons (optionnel : selon timestamp ou tout le DataFrame)
         df = df.drop_duplicates()
 
-        logging.debug("Envoi des données à InfluxDB...")
-        
+        points = []
         for _, row in df.iterrows():
-            # Créer un point pour chaque ligne du DataFrame
             point = Point("energy_data") \
-                .field("forecast", row["forecast"]) \
-                .field("hour", row["hour"]) \
-                .field("day_of_week", row["day_of_week"]) \
-                .field("month", row["month"]) \
-                .field("week_of_year", row["week_of_year"]) \
-                .time(row["timestamp"], WritePrecision.NS)  # Vérifier le format du timestamp
+                .field("temperature", float(row["temperature"])) \
+                .field("humidity", float(row["humidity"])) \
+                .field("energyproduced", float(row["energyproduced"])) \
+                .field("hour", int(row["hour"])) \
+                .field("day_of_week", int(row["day_of_week"])) \
+                .field("month", int(row["month"])) \
+                .field("week_of_year", int(row["week_of_year"])) \
+                .time(row["timestamp"], WritePrecision.NS)
+            points.append(point)
 
-            try:
-                # Essayer d'écrire dans InfluxDB
-                write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
-            except Exception as e:
-                logging.error(f"Erreur lors de l'écriture dans InfluxDB pour le timestamp {row['timestamp']}: {e}")
-                continue  # Ignorer cette ligne et passer à la suivante
-
-        logging.debug("Toutes les données ont été envoyées et enregistrées dans InfluxDB.")
-        client.close()  # Fermer la connexion à InfluxDB
+        write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=points)
+        logging.info("Données sauvegardées avec succès dans InfluxDB.")
+        client.close()
     except Exception as e:
         logging.error(f"Erreur lors de la sauvegarde dans InfluxDB : {e}")
-        raise  # Relancer l'erreur pour propager la gestion des erreurs
+        raise
+
+def query_influx():
+    try:
+        logging.debug("Récupération des données enrichies depuis InfluxDB...")
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        query_api = client.query_api()
+
+        # Nouvelle requête correcte
+        query = '''
+        import "date"
+        from(bucket: "energy_data") 
+        |> range(start: -0)
+        |> filter(fn: (r) => r._measurement == "energy_data")
+        |> filter(fn: (r) => date.hour(t: r._time) == 15 and date.minute(t: r._time) == 0 and date.second(t: r._time) == 0)  
+        |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+        |> sort(columns: ["_time"], desc: true)
+        '''
+
+
+        # Exécuter la requête
+        tables = query_api.query(query)
+        results = []
+
+        # Parcourir les résultats et les ajouter à la liste 'results'
+        for table in tables:
+            for record in table.records:
+                try:
+                    results.append({
+                        "timestamp": record.get_time(),
+                        "temperature": record.values.get("temperature"),
+                        "humidity": record.values.get("humidity"),
+                        "energyproduced": record.values.get("energyproduced"),
+                        "hour": record.values.get("hour"),
+                        "day_of_week": record.values.get("day_of_week"),
+                        "month": record.values.get("month"),
+                        "week_of_year": record.values.get("week_of_year")
+                    })
+                except KeyError as e:
+                    logging.error(f"Clé manquante dans l'enregistrement : {e}")
+
+        logging.debug(f"{len(results)} enregistrements récupérés depuis InfluxDB.")
+        client.close()
+        return results
+
+    except Exception as e:
+        logging.error(f"Erreur lors de la requête InfluxDB : {e}")
+        return []
+
+
+if __name__ == "__main__":
+    try:
+        logging.info("Début du processus ETL...")
+        df = load_data_from_postgres()
+
+        if not df.empty:
+            df = add_time_features(df)
+            clear_old_data()
+            save_to_influx(df)
+        else:
+            logging.warning("Aucune donnée à traiter.")
+
+        logging.info("Processus ETL terminé avec succès.")
+    except Exception as e:
+        logging.error(f"Erreur critique dans le script ETL : {e}")
