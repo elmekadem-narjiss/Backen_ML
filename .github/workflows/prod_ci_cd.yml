@@ -69,8 +69,7 @@ jobs:
               timestamp TIMESTAMP,
               temperature DOUBLE PRECISION,
               humidity DOUBLE PRECISION,
-              pressure DOUBLE PRECISION,
-              prediction DOUBLE PRECISION
+              energyproduced DOUBLE PRECISION
             );
           "
 
