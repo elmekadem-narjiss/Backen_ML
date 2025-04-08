@@ -61,5 +61,18 @@ jobs:
             sleep 3
           done
 
+      - name: Create predictions table
+        run: |
+          sudo apt-get install -y postgresql-client
+          PGPASSWORD=admin123 psql -h localhost -U admin -d energy_db -c "
+            CREATE TABLE IF NOT EXISTS predictions (
+              timestamp TIMESTAMP,
+              temperature DOUBLE PRECISION,
+              humidity DOUBLE PRECISION,
+              pressure DOUBLE PRECISION,
+              prediction DOUBLE PRECISION
+            );
+          "
+
       - name: Run unit tests
         run: pytest tests/test_main.py
