@@ -33,4 +33,4 @@ jobs:
           pip install pytest
 
       - name: Run unit tests
-        run: pytest app/tests/test_sarimax.py
+        run: pytest app/tests/test_main.py
