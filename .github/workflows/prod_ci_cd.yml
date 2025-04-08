@@ -1,0 +1,46 @@
+name: MLOps CI/CD for PROD
+
+on:
+  push:
+    branches:
+      - prod
+  pull_request:
+    branches:
+      - prod
+
+jobs:
+  mlops-prod-pipeline:
+    runs-on: ubuntu-latest
+
+    env:
+      INFLUX_URL: ${{ secrets.INFLUX_URL }}
+      INFLUX_TOKEN: ${{ secrets.INFLUX_TOKEN }}
+      INFLUX_ORG: ${{ secrets.INFLUX_ORG }}
+
+    steps:
+    - name: 🔄 Checkout Repository
+      uses: actions/checkout@v3
+
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: 📦 Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: 🧪 Run Unit Tests
+      run: |
+        pytest app/tests/test_sarimax.py
+
+    - name: 📈 Run SARIMAX MLflow Script
+      run: |
+        python app/mlflow/sarimax_mlflow.py
+
+    - name: 🚀 Launch FastAPI (Local Test)
+      run: |
+        nohup uvicorn app.api.main:app --host 127.0.0.1 --port 8000 &
+        sleep 5
+        curl http://127.0.0.1:8000/docs || echo "⚠️ FastAPI didn't launch correctly"
