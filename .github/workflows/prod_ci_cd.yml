@@ -33,6 +33,7 @@ jobs:
           pip install pytest
           pip install httpx  
           pip install redis
+          pip install paho-mqtt
 
       - name: Run unit tests
         run: pytest tests/test_main.py
